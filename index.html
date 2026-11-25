@@ -1476,7 +1476,8 @@ abbr[title]{text-decoration:underline dotted;cursor:help}
   UI.onSave = fn => listeners.push(fn);
   UI.save = UI.debounce(() => { S.updated = Date.now(); try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { } listeners.forEach(f => f(S)); }, 300);
   UI.replaceState = (obj) => { S = Object.assign(blank(), obj); S.settings = Object.assign(blank().settings, S.settings); S.play = Object.assign(blank().play, S.play); try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { } UI.applySettings(); };
-  UI.resetState = () => { S = blank(); try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { } UI.applySettings(); };
+  UI.deviceId = (() => { let id; try { id = localStorage.getItem('feltlab.device'); if (!id) { id = 'd' + Math.random().toString(36).slice(2, 10); localStorage.setItem('feltlab.device', id); } } catch (e) { id = 'd' + Math.random().toString(36).slice(2, 10); } return id; })();
+  UI.resetState = () => { S = blank(); S.epoch = Date.now(); try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { } UI.applySettings(); };
   UI.applySettings = () => {
     const root = document.documentElement; const t = S.settings.theme;
     if (t === 'light' || t === 'dark') root.setAttribute('data-theme', t); else if (UI._hostTheme) root.setAttribute('data-theme', UI._hostTheme); else root.removeAttribute('data-theme');
@@ -2746,11 +2747,16 @@ abbr[title]{text-decoration:underline dotted;cursor:help}
         if (box.dataset.done) return; box.dataset.done = 1;
         let ok; if (q.type === 'slider') ok = Math.abs(val - q.answer) <= q.tol; else ok = val === q.answer;
         if (ok) correct++; results.push(ok);
-        const st = S.drills[id] = S.drills[id] || { n: 0, c: 0, hist: [] }; st.n++; if (ok) st.c++; st.hist.push([Date.now(), ok ? 1 : 0, Date.now() - t0]); if (st.hist.length > 400) st.hist.shift();
-        // SRS
+        const S = UI.S(); const now = Date.now();
+        const st = S.drills[id] = S.drills[id] || { n: 0, c: 0, hist: [], dev: {} };
+        if (!st.dev) st.dev = st.n ? { legacy: { n: st.n, c: st.c } } : {};
+        const me = st.dev[UI.deviceId] = st.dev[UI.deviceId] || { n: 0, c: 0 }; me.n++; if (ok) me.c++;
+        st.n = 0; st.c = 0; Object.values(st.dev).forEach(v => { st.n += v.n; st.c += v.c; });
+        st.hist.push([now, ok ? 1 : 0, now - t0]); if (st.hist.length > 400) st.hist.shift();
+        // SRS (items are versioned with u, and retired with done rather than deleted, so devices merge cleanly)
         const existing = S.srs.findIndex(x => x.d === id && x.seed === seed);
-        if (!ok) { if (existing < 0) S.srs.push({ d: id, seed, box: 0, due: Date.now() }); else { S.srs[existing].box = 0; S.srs[existing].due = Date.now() + 60e3; } }
-        else if (existing >= 0) { const it = S.srs[existing]; it.box++; const iv = [0, 1, 3, 7, 21][it.box] ?? null; if (iv === null) S.srs.splice(existing, 1); else it.due = Date.now() + iv * 864e5; }
+        if (!ok) { if (existing < 0) S.srs.push({ d: id, seed, box: 0, due: now, u: now }); else Object.assign(S.srs[existing], { box: 0, due: now + 60e3, done: false, u: now }); }
+        else if (existing >= 0) { const it = S.srs[existing]; if (!it.done) { it.box++; const iv = [0, 1, 3, 7, 21][it.box]; if (iv === undefined) it.done = true; else it.due = now + iv * 864e5; it.u = now; } }
         UI.logActivity('drill', { d: id, ok: ok ? 1 : 0 });
         if (q.type === 'slider') { $('[data-sub]', ab).disabled = true; } else { $$('[data-v]', ab).forEach(b => { b.disabled = true; const v = b.dataset.v; if (String(q.answer) === v) b.classList.add('pri'); else if (String(val) === v) b.classList.add('red'); }); }
         const fb = $('[data-fb]', box);
@@ -2773,14 +2779,14 @@ abbr[title]{text-decoration:underline dotted;cursor:help}
     const finish = () => {
       dots();
       const S2 = UI.S(); S2.sessions = S2.sessions || [];
-      $('[data-q]', el).innerHTML = `<div class="card felt" style="text-align:center;padding:30px"><div class="big">${correct} / ${total}</div><p style="margin-top:8px">${correct === total ? 'Perfect round.' : correct / total >= 0.7 ? 'Solid work.' : 'Missed questions go into your review queue.'}</p></div><div class="row mt" style="justify-content:center"><button class="btn pri" data-again>Another round</button><a class="btn" href="#drills">All drills</a>${S2.srs.length ? `<button class="btn" data-rev>Review ${S2.srs.filter(x => x.due <= Date.now()).length} due</button>` : ''}</div>`;
+      $('[data-q]', el).innerHTML = `<div class="card felt" style="text-align:center;padding:30px"><div class="big">${correct} / ${total}</div><p style="margin-top:8px">${correct === total ? 'Perfect round.' : correct / total >= 0.7 ? 'Solid work.' : 'Missed questions go into your review queue.'}</p></div><div class="row mt" style="justify-content:center"><button class="btn pri" data-again>Another round</button><a class="btn" href="#drills">All drills</a>${UI.dueReviews().length ? `<button class="btn" data-rev>Review ${UI.dueReviews().length} due</button>` : ''}</div>`;
       $('[data-again]', el).onclick = () => UI.runDrill(el, ids, Object.assign({}, opts, { review: null }));
       const rv = $('[data-rev]', el); if (rv) rv.onclick = () => UI.runDrill(el, ids, { review: UI.dueReviews() });
     };
-    const pickWeighted = (list) => { if (list.length === 1) return list[0]; const w = list.map(id => { const st = S.drills[id]; const acc = st && st.n ? st.c / st.n : 0.5; return 0.4 + (1 - acc); }); let r = Math.random() * w.reduce((a, b) => a + b, 0); for (let i = 0; i < list.length; i++) { r -= w[i]; if (r <= 0) return list[i]; } return list[0]; };
+    const pickWeighted = (list) => { if (list.length === 1) return list[0]; const w = list.map(id => { const st = UI.S().drills[id]; const acc = st && st.n ? st.c / st.n : 0.5; return 0.4 + (1 - acc); }); let r = Math.random() * w.reduce((a, b) => a + b, 0); for (let i = 0; i < list.length; i++) { r -= w[i]; if (r <= 0) return list[i]; } return list[0]; };
     next();
   };
-  UI.dueReviews = () => UI.S().srs.filter(x => x.due <= Date.now()).sort((a, b) => a.due - b.due);
+  UI.dueReviews = () => UI.S().srs.filter(x => !x.done && x.due <= Date.now()).sort((a, b) => a.due - b.due);
 
   UI.route('drills', (main) => {
     const S = UI.S(); const cats = [...new Set(D.map(d => d.cat))];
@@ -3665,30 +3671,116 @@ abbr[title]{text-decoration:underline dotted;cursor:help}
 
   // ---------- Sync / backup ----------
   const Sync = UI.Sync = { db: null, uid: null, status: 'off', last: null, downloads: null };
-  function compact(s) {
+  function compact(s, limit, keepHist) {
+    limit = limit || 240000;
     const c = JSON.parse(JSON.stringify(s));
     c.play.hands = c.play.hands.slice(-1500); c.log = c.log.slice(-1200);
-    Object.values(c.drills).forEach(d => d.hist = d.hist.slice(-80));
+    if (!keepHist) Object.values(c.drills).forEach(d => d.hist = d.hist.slice(-80));
     let str = JSON.stringify(c);
-    while (str.length > 240000 && c.play.hands.length > 100) { c.play.hands = c.play.hands.slice(-Math.floor(c.play.hands.length / 2)); c.log = c.log.slice(-Math.floor(c.log.length / 2)); str = JSON.stringify(c); }
+    while (str.length > limit && c.play.hands.length > 100) { c.play.hands = c.play.hands.slice(-Math.floor(c.play.hands.length / 2)); c.log = c.log.slice(-Math.floor(c.log.length / 2)); str = JSON.stringify(c); }
     return c;
   }
+  UI.compactState = compact;
+  // Merge two progress states. Safe to repeat any number of times between any devices:
+  // drill counts are per-device counters (max per device, summed), lists are unions, review items keep their newest version,
+  // and a reset (newer epoch) replaces everything older.
   UI.mergeStates = function (a, b) {
-    const out = JSON.parse(JSON.stringify(a.updated >= b.updated ? a : b)); const other = a.updated >= b.updated ? b : a;
-    // lessons
-    Object.entries(other.lessons || {}).forEach(([k, v]) => { const o = out.lessons[k]; if (!o) out.lessons[k] = v; else { if (v.done && (!o.done || v.done < o.done)) o.done = v.done; if (v.best !== undefined) o.best = Math.max(o.best || 0, v.best); } });
-    // drills
-    Object.entries(other.drills || {}).forEach(([k, v]) => { const o = out.drills[k]; if (!o) { out.drills[k] = v; return; } const seen = new Set(o.hist.map(h => h[0])); const extra = v.hist.filter(h => !seen.has(h[0])); o.n += extra.length; o.c += extra.filter(h => h[1]).length; o.hist = o.hist.concat(extra).sort((x, y) => x[0] - y[0]).slice(-400); });
-    // srs
-    const key = x => x.d + ':' + x.seed; const sm = new Map(); (other.srs || []).concat(out.srs || []).forEach(x => sm.set(key(x), x)); out.srs = [...sm.values()];
-    // hands, sessions, log
+    if ((a.epoch || 0) !== (b.epoch || 0)) return JSON.parse(JSON.stringify((a.epoch || 0) > (b.epoch || 0) ? a : b));
+    const newer = (a.updated || 0) >= (b.updated || 0) ? a : b, other = newer === a ? b : a;
+    const out = JSON.parse(JSON.stringify(newer));
+    out.lessons = out.lessons || {}; out.drills = out.drills || {}; out.srs = out.srs || []; out.log = out.log || []; out.play = out.play || { hands: [], sessions: [] };
+    Object.entries(other.lessons || {}).forEach(([k, v]) => { const o = out.lessons[k]; if (!o) out.lessons[k] = JSON.parse(JSON.stringify(v)); else { if (v.done && (!o.done || v.done < o.done)) o.done = v.done; if (v.best !== undefined) o.best = Math.max(o.best || 0, v.best); } });
+    const norm = d => { if (!d.dev) d.dev = d.n ? { legacy: { n: d.n, c: d.c } } : {}; d.hist = d.hist || []; return d; };
+    Object.entries(other.drills || {}).forEach(([k, v]) => {
+      const y = norm(JSON.parse(JSON.stringify(v))); const x = out.drills[k];
+      if (!x) { out.drills[k] = y; return; } norm(x);
+      Object.entries(y.dev).forEach(([dv, cnt]) => { const o = x.dev[dv]; if (!o) x.dev[dv] = { n: cnt.n, c: cnt.c }; else { o.n = Math.max(o.n, cnt.n); o.c = Math.max(o.c, cnt.c); } });
+      x.n = 0; x.c = 0; Object.values(x.dev).forEach(cnt => { x.n += cnt.n; x.c += cnt.c; });
+      const seen = new Set(x.hist.map(h => h[0])); x.hist = x.hist.concat(y.hist.filter(h => !seen.has(h[0]))).sort((p, q) => p[0] - q[0]).slice(-400);
+    });
+    const key = x => x.d + ':' + x.seed; const sm = new Map();
+    (out.srs || []).forEach(x => sm.set(key(x), x));
+    (other.srs || []).forEach(x => { const o = sm.get(key(x)); if (!o || (x.u || 0) > (o.u || 0)) sm.set(key(x), JSON.parse(JSON.stringify(x))); });
+    out.srs = [...sm.values()];
     const uniq = (arr, k) => { const m = new Map(); arr.forEach(x => m.set(k(x), x)); return [...m.values()].sort((x, y) => x.t - y.t); };
-    out.play.hands = uniq((other.play.hands || []).concat(out.play.hands || []), x => x.t + ':' + x.hole).slice(-5000);
-    out.play.sessions = uniq((other.play.sessions || []).concat(out.play.sessions || []), x => x.t);
+    out.play.hands = uniq(((other.play || {}).hands || []).concat(out.play.hands || []), x => x.t + ':' + x.hole).slice(-5000);
+    out.play.sessions = uniq(((other.play || {}).sessions || []).concat(out.play.sessions || []), x => x.t);
     out.log = uniq((other.log || []).concat(out.log || []), x => x.t + ':' + x.k).slice(-4000);
-    out.updated = Date.now();
+    out.updated = Math.max(a.updated || 0, b.updated || 0);
     return out;
   };
+  // A fingerprint of everything that matters, used to decide whether a sync needs to read or write anything
+  UI.stateSig = function (s) {
+    const last = arr => arr && arr.length ? arr[arr.length - 1].t : 0;
+    const d = Object.keys(s.drills || {}).sort().map(k => { const x = s.drills[k]; return k + ':' + x.n + ':' + x.c; }).join('|');
+    const l = Object.keys(s.lessons || {}).sort().map(k => k + ':' + (s.lessons[k].done ? 1 : 0) + ':' + (s.lessons[k].best ?? '')).join('|');
+    const r = (s.srs || []).map(x => x.d + x.seed + ':' + (x.u || 0)).sort().join('|');
+    return [s.epoch || 0, d, l, r, s.play.hands.length, last(s.play.hands), s.play.sessions.length, last(s.play.sessions), s.log.length, last(s.log), JSON.stringify(s.settings)].join('#');
+  };
+
+  // ---------- Device sync through a private GitHub gist ----------
+  const GS = UI.GistSync = { cfg: null, status: 'off', last: null, err: null, busy: false, dirty: false };
+  const SKEY = 'feltlab.sync', GFILE = 'felt-lab-progress.json', GAPI = 'https://api.github.com';
+  try { GS.cfg = JSON.parse(localStorage.getItem(SKEY)) || null; } catch (e) { }
+  const saveCfg = c => { GS.cfg = c; try { c ? localStorage.setItem(SKEY, JSON.stringify(c)) : localStorage.removeItem(SKEY); } catch (e) { } };
+  async function gh(path, opts, token) {
+    opts = opts || {};
+    const r = await fetch(GAPI + path, { method: opts.method || 'GET', cache: 'no-store', headers: Object.assign({ Accept: 'application/vnd.github+json', Authorization: 'Bearer ' + (token || GS.cfg.token), 'X-GitHub-Api-Version': '2022-11-28' }, opts.body ? { 'Content-Type': 'application/json' } : {}), body: opts.body });
+    if (!r.ok) { const e = new Error('GitHub ' + r.status); e.status = r.status; throw e; }
+    return r.status === 204 ? null : r.json();
+  }
+  const remoteContent = st => JSON.stringify(Object.assign({ app: 'feltlab', v: 1 }, compact(st, 900000, true)));
+  async function readRemote() {
+    const g = await gh('/gists/' + GS.cfg.gist); const f = g.files && g.files[GFILE]; if (!f) return null;
+    let txt = f.content; if (f.truncated && f.raw_url) txt = await (await fetch(f.raw_url, { cache: 'no-store' })).text();
+    try { const o = JSON.parse(txt); return o && o.drills && o.play ? o : null; } catch (e) { return null; }
+  }
+  const SYNC_ERR = { 401: 'GitHub rejected the token — it may have expired or been revoked. Create a new one and reconnect.', 403: 'GitHub refused access. Check the token has the "gist" permission.', 404: 'The sync file was not found on GitHub. Disconnect and connect again to recreate it.' };
+  GS.connect = async function (input) {
+    input = (input || '').trim(); let token = input, gist = null;
+    const m = input.match(/^feltlab-sync:([A-Za-z0-9+/=_-]+)$/);
+    if (m) { try { const o = JSON.parse(atob(m[1].replace(/-/g, '+').replace(/_/g, '/'))); token = o.t; gist = o.g; } catch (e) { throw new Error('That sync key is damaged — copy it again.'); } }
+    if (!/^(ghp_|github_pat_|gho_)[A-Za-z0-9_]{20,}$/.test(token)) throw new Error('That doesn\'t look like a GitHub token or a Felt Lab sync key.');
+    if (!gist) {
+      for (let page = 1; page <= 5 && !gist; page++) { const list = await gh(`/gists?per_page=100&page=${page}`, null, token); const hit = list.find(x => x.files && x.files[GFILE]); if (hit) gist = hit.id; if (list.length < 100) break; }
+      if (!gist) { const g = await gh('/gists', { method: 'POST', body: JSON.stringify({ description: 'Felt Lab progress sync (written by the app — do not edit)', public: false, files: { [GFILE]: { content: remoteContent(UI.S()) } } }) }, token); gist = g.id; }
+    } else { await gh('/gists/' + gist, null, token); }
+    saveCfg({ token, gist, at: Date.now() });
+    await GS.sync(true);
+  };
+  GS.disconnect = () => { saveCfg(null); GS.status = 'off'; GS.last = null; GS.err = null; };
+  GS.key = () => 'feltlab-sync:' + btoa(JSON.stringify({ t: GS.cfg.token, g: GS.cfg.gist })).replace(/\+/g, '-').replace(/\//g, '_');
+  GS.sync = async function (manual) {
+    if (!GS.cfg) return;
+    if (GS.busy) { GS.again = true; return GS.running; }
+    if (!navigator.onLine) { GS.status = 'offline'; GS.refresh(); return; }
+    GS.busy = true; GS.status = 'syncing'; GS.dirty = false; GS.refresh();
+    let done; GS.running = new Promise(r => done = r);
+    try {
+      const remote = await readRemote(); const local = UI.S();
+      const merged = remote ? UI.mergeStates(local, remote) : local;
+      let pulled = false;
+      if (UI.stateSig(merged) !== UI.stateSig(local)) { UI.replaceState(merged); pulled = true; }
+      const out = remoteContent(UI.S());
+      if (!remote || UI.stateSig(JSON.parse(out)) !== UI.stateSig(remote)) await gh('/gists/' + GS.cfg.gist, { method: 'PATCH', body: JSON.stringify({ files: { [GFILE]: { content: out } } }) });
+      GS.last = Date.now(); GS.status = 'on'; GS.err = null;
+      if (pulled) { const h = location.hash; if (!/^#(play|drill-)/.test(h)) UI.render(); UI.toast('Progress synced from your other devices'); }
+      else if (manual) UI.toast('Everything is in sync');
+    } catch (e) { GS.status = 'error'; GS.err = SYNC_ERR[e.status] || (e.status ? 'GitHub error ' + e.status + '.' : 'Could not reach GitHub — will retry when you are online.'); }
+    GS.busy = false; GS.refresh(); done();
+    if (GS.again) { GS.again = false; setTimeout(() => GS.sync(), 400); }
+  };
+  GS.refresh = () => { const el = document.querySelector('[data-gsstatus]'); if (el) el.innerHTML = gsStatusHTML(); };
+  function gsStatusHTML() {
+    if (!GS.cfg) return 'Not set up on this device.';
+    const t = GS.last ? new Date(GS.last).toLocaleString([], { hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short' }) : null;
+    return { syncing: `${UI.spinner} Syncing…`, on: `<span class="pill g">On</span> Last synced ${t}.`, offline: `<span class="pill w">Offline</span> Changes are saved here and will sync when you reconnect.`, error: `<span class="pill r">Problem</span> ${esc(GS.err || '')}`, off: '<span class="pill">Connected</span> Waiting to sync…' }[GS.status] || '';
+  }
+  const pushSoon = UI.debounce(() => GS.sync(), 15000);
+  UI.onSave(() => { if (GS.cfg && !GS.busy) { GS.dirty = true; pushSoon(); } });
+  window.addEventListener('online', () => GS.cfg && GS.sync());
+  document.addEventListener('visibilitychange', () => { if (!GS.cfg) return; if (document.visibilityState === 'hidden' && GS.dirty) GS.sync(); else if (document.visibilityState === 'visible' && (!GS.last || Date.now() - GS.last > 60000)) GS.sync(); });
+
   async function initCloud() {
     if (!window.claude || typeof window.claude.use !== 'function') return;
     try {
@@ -3723,13 +3815,17 @@ abbr[title]{text-decoration:underline dotted;cursor:help}
     const syncTxt = { on: `On — your progress is saved to your Claude account${Sync.last ? ' (last sync ' + new Date(Sync.last).toLocaleTimeString() + ')' : ''}.`, off: IS_HOSTED ? 'Connecting…' : PWA.ok ? 'This is the installed app. Progress is stored on this device — use backup below to move it to another device or to the Claude link.' : 'This is the offline copy. Progress is stored on this device only — use backup below to move it.', unavailable: 'Not available in this view.', signedout: 'Sign in to Claude to sync.', error: 'Sync hit an error — your progress is still saved on this device.' }[Sync.status];
     main.innerHTML = `<div class="band"><div class="narrow"><a class="crumb" href="#more">${UI.icon('back', 18)} More</a><h1>Settings &amp; sync</h1>
       <div class="card"><h3>Appearance</h3><label class="f">Theme<div class="seg" data-th>${['system', 'light', 'dark'].map(t => `<button data-v="${t}" class="${st.theme === t ? 'on' : ''}">${t[0].toUpperCase() + t.slice(1)}</button>`).join('')}</div></label><label class="check"><input type="checkbox" data-four ${st.four ? 'checked' : ''}> Four-colour deck (blue diamonds, green clubs)</label><div class="row">${UI.cardsHTML(PK.parseCards('AsKhQdJc'), 'sm')}</div></div>
-      <div class="card mt"><h3>${UI.icon('cloud', 20)} Online sync</h3><p>${esc(syncTxt)}</p>${Sync.status === 'on' ? `<button class="btn sm" data-sync>Sync now</button>` : ''}
-        <p class="small muted">${PWA.ok ? 'Each copy of Felt Lab (this app, the downloaded file, the Claude link) keeps its own progress. Export from one and Import into another — they merge, nothing is lost.' : IS_HOSTED ? 'When you open Felt Lab from its link while online, progress saves to a private record in your Claude account and merges automatically. The downloaded offline file keeps its own progress on the device; bring it back here with Export / Import.' : 'Open the Felt Lab link when you are online to sync. Export your progress here, then Import it there — the two are merged, nothing is lost.'}</p></div>
+      ${IS_HOSTED ? `<div class="card mt"><h3>${UI.icon('cloud', 20)} Online sync</h3><p>${esc(syncTxt)}</p>${Sync.status === 'on' ? `<button class="btn sm" data-sync>Sync now</button>` : ''}
+        <p class="small muted">When you open Felt Lab from its link while online, progress saves to a private record in your Claude account and merges automatically. The installed app and the downloaded file keep their own progress; bring it here with Export / Import.</p></div>` : `<div class="card mt"><h3>${UI.icon('cloud', 20)} Sync between your devices</h3><p data-gsstatus>${gsStatusHTML()}</p>
+        ${GS.cfg ? `<div class="row"><button class="btn pri" data-gsnow>${UI.icon('refresh', 18)} Sync now</button><button class="btn" data-gskey>Copy sync key</button><button class="btn ghost" data-gsoff>Disconnect this device</button></div><p class="small muted">To add another device (phone, laptop): tap <b>Copy sync key</b>, send it to yourself by email or a notes app, then paste it into Settings on the other device. Treat the key like a password — anyone with it can read and change your progress.</p>`
+        : `<p class="ink2">Keep one set of progress across your phone, tablet and laptop. Felt Lab saves it to a private file (a "secret gist") in your GitHub account and merges with it whenever a device opens or comes back online — using two devices offline loses nothing.</p>
+        <ol style="padding-left:1.3em;margin:0 0 12px"><li><b>First device only:</b> <a href="https://github.com/settings/tokens/new?scopes=gist&amp;description=Felt%20Lab%20sync" target="_blank" rel="noopener">create a GitHub token</a>. Only the <b>gist</b> box should be ticked. Pick an expiry (or "No expiration"), tap <b>Generate token</b>, and copy it.</li><li>Paste it below and tap <b>Connect</b>.</li><li><b>Every other device:</b> paste the <b>sync key</b> from the first device instead of a token.</li></ol>
+        <div class="row"><input type="password" placeholder="GitHub token or Felt Lab sync key" data-gsin style="flex:1;min-width:220px" autocomplete="off" spellcheck="false"><button class="btn pri" data-gscon>Connect</button></div><p class="small" data-gsmsg></p>`}</div>`}
       <div class="card mt"><h3>Backup &amp; move progress</h3><div class="row"><button class="btn" data-exp>${UI.icon('download', 18)} Export progress</button><button class="btn" data-copy>Copy as text</button><label class="btn">${UI.icon('upload', 18)} Import file<input type="file" accept=".json,application/json,text/plain" data-imp hidden></label><button class="btn" data-paste>Paste text</button></div><p class="small muted">Imports are merged with what is already here.</p></div>
       ${PWA.ok ? `<div class="card mt"><h3>${UI.icon('download', 20)} Install as an app</h3><p data-pwa>${PWA.installed ? 'Installed. Felt Lab opens from its home-screen icon and works offline.' : PWA.prompt ? 'Add Felt Lab to your home screen. It opens full-screen and works offline.' : 'In Chrome, tap ⋮ then <b>Install app</b> (or <b>Add to Home screen</b>).'}</p>${PWA.prompt && !PWA.installed ? '<button class="btn pri" data-inst>Install Felt Lab</button>' : ''}<p class="small muted">${PWA.cached ? 'Offline copy stored on this device.' : 'Preparing offline copy…'} ${PWA.persisted ? 'Storage is protected from automatic clean-up.' : ''}</p></div>` : ''}
       ${IS_HOSTED ? `<div class="card mt"><h3>${UI.icon('download', 20)} Offline copy</h3><p>Download Felt Lab as a single file. Open it in Chrome on your tablet in flight mode — everything works without a connection.</p><button class="btn pri" data-off>Download offline file</button><p class="small muted" data-offn></p></div>` : `<div class="card mt"><h3>Sharing</h3><p>This whole app is one file. Send it to anyone (messaging app, email, USB) — they open it in a browser. Their progress stays on their device.</p></div>`}
       <div class="card mt"><h3>Sharing with others</h3><ul><li><b>The link</b>: share the Felt Lab page from its menu in Claude. Each person keeps their own private progress.</li><li><b>The file</b>: send the offline file to any device — phone, tablet, laptop.</li></ul></div>
-      <div class="card mt"><h3>Reset</h3><p class="small muted">Clears all progress on this device${IS_HOSTED ? ' (your cloud copy is overwritten at the next sync)' : ''}.</p><button class="btn red" data-reset>Reset everything</button></div>
+      <div class="card mt"><h3>Reset</h3><p class="small muted">Clears all progress on this device${IS_HOSTED ? ' (your cloud copy is overwritten at the next sync)' : GS.cfg ? ' and on your other synced devices' : ''}.</p><button class="btn red" data-reset>Reset everything</button></div>
       <p class="small muted mt">Felt Lab · equity engine verified against exhaustive 5-card enumeration · ${PK.DATA.N.toLocaleString()} boards per preflop matchup. Easy Game content summarised in our own words with chapter references; the book is © 2009 Andrew Seidman (heads-up chapter © Matt Colletta).</p></div></div>`;
     $$('[data-th] button', main).forEach(b => b.onclick = () => { st.theme = b.dataset.v; UI.save(); UI.applySettings(); UI.render(); });
     $('[data-four]', main).onchange = e => { st.four = e.target.checked; UI.save(); UI.applySettings(); };
@@ -3745,7 +3841,11 @@ abbr[title]{text-decoration:underline dotted;cursor:help}
         const ok = await saveFile('felt-lab.html', html); n.textContent = ok ? 'Saved. On Android it lands in Downloads — open it with Chrome.' : 'Your browser blocked the download.'; } catch (e) { n.textContent = 'Download failed.'; }
     };
     const ib = $('[data-inst]', main); if (ib) ib.onclick = async () => { try { PWA.prompt.prompt(); const r = await PWA.prompt.userChoice; if (r && r.outcome === 'accepted') { PWA.installed = true; PWA.prompt = null; UI.toast('Installed'); } } catch (e) { } UI.render(); };
-    $('[data-reset]', main).onclick = async () => { if (await UI.confirm('Erase all lessons, drills, hands and settings on this device?', 'Erase')) { UI.resetState(); UI.render(); } };
+    const gcon = $('[data-gscon]', main); if (gcon) gcon.onclick = async () => { const msg = $('[data-gsmsg]', main); msg.innerHTML = UI.spinner + ' Connecting…'; gcon.disabled = true; try { await GS.connect($('[data-gsin]', main).value); UI.render(); UI.toast('Sync is on for this device'); } catch (e) { msg.textContent = e.status ? (SYNC_ERR[e.status] || 'GitHub error ' + e.status) : e.message.startsWith('Failed') || e.name === 'TypeError' ? 'Could not reach GitHub. Check you are online.' : e.message; gcon.disabled = false; } };
+    const gnow = $('[data-gsnow]', main); if (gnow) gnow.onclick = () => GS.sync(true);
+    const gkey = $('[data-gskey]', main); if (gkey) gkey.onclick = async () => { const k = GS.key(); try { await navigator.clipboard.writeText(k); UI.toast('Sync key copied — paste it on your other device'); } catch (e) { UI.modal(`<h3>Your sync key</h3><p class="small muted">Copy this and paste it into Settings on your other device. Keep it private.</p><textarea readonly style="min-height:120px;font-family:monospace;font-size:13px">${esc(k)}</textarea><div class="row" style="justify-content:flex-end"><button class="btn pri" data-close>Done</button></div>`); } };
+    const goff = $('[data-gsoff]', main); if (goff) goff.onclick = async () => { if (await UI.confirm('Stop syncing on this device? Your progress stays here and on GitHub; other devices keep syncing.', 'Disconnect')) { GS.disconnect(); UI.render(); } };
+    $('[data-reset]', main).onclick = async () => { if (await UI.confirm(GS.cfg ? 'Erase all lessons, drills, hands and settings — on this device <b>and on every synced device</b>?' : 'Erase all lessons, drills, hands and settings on this device?', 'Erase')) { UI.resetState(); if (GS.cfg) GS.sync(); UI.render(); } };
   });
 
   // ---------- installable app (served over https, top-level only) ----------
@@ -3771,6 +3871,7 @@ abbr[title]{text-decoration:underline dotted;cursor:help}
   try { const mo = new MutationObserver(() => { const t = document.documentElement.getAttribute('data-theme'); if (UI.S().settings.theme === 'system' && t) UI._hostTheme = t; }); mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] }); } catch (e) { }
   UI.render();
   setTimeout(initCloud, 0);
+  if (GS.cfg && !IS_HOSTED) setTimeout(() => GS.sync(), 1200);
 })();
 </script>
 </body></html>
